@@ -13,7 +13,9 @@ Example Execution:
 Just put the script read_stat_files.py into the data directory of your SAP instance and run it without any options. It will then create one CSV file per stat file:
 
 $ cd /usr/sap/SID/DVEBMGS00/data
+
 $ python read_stat_files.py
+
 
 Current limitations:
 - many interessting metrics like e.g. the database response time or the overall runtime are not yet available
