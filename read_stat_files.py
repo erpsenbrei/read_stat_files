@@ -4,6 +4,11 @@
 # any later version.
 # Author: erpsenbrei on GitHub
 # Date: 2023-06-06
+#
+# This script reads in SAP stat files, which contain performance metrics 
+# for SAP transactions, and converts the data into a human-readable format. 
+# No ABAP interface or logon to a SAP system is needed. The output can be 
+# saved as either as CSV or Excel files. 
 
 from datetime import datetime
 import pandas as pd
@@ -11,13 +16,17 @@ from io import StringIO
 import argparse
 import os
 
-# global variables used for processing the stat records line by line
-record_old = ""
-record_new = ""
-row_num = 0
+# These three global variables are used for processing the stat records line by line.
+# Using global variables requires passing less arguments for the functions.
+record_old = "" # contains the raw bytes format of the performance record
+record_new = "" # contains the converted data of the performance record
+row_num = 0     # counts the performance records of the current stat file
        
 def convert_sap_number(four_bytes_input):
-    # sap uses a strange legacy number format in the stat files
+    # SAP uses a strange legacy number format in the stat files.
+    # This function converts the legacy format to a normal number.
+    # Internally, these are microseconds, but transaction STAD shows miliseconds,
+    # so in the end the value is divided by 1000 and rounded.
     if four_bytes_input[0]=='4':                # the first character is always 4
         exponent= int(four_bytes_input[1:3],16) # second and third character are the exponent
         factor1 = int(four_bytes_input[3:5],16) # fourth and fifth character are factor1
@@ -30,7 +39,8 @@ def convert_sap_number(four_bytes_input):
     return str(round(result/1000)) # sometimes the result needs to be divided by 1024, don't ask me why, but the error is minuscule.
 
 def add_generic(number_of_bytes, relevant):
-    # add a column by simply writing the bytes values
+    # add a column to the output by simply writing the bytes values
+    # this usually means that the meaning for this column is not known (yet)
     global record_old
     global record_new
     if args.columns=="all" or relevant==1:
@@ -38,7 +48,8 @@ def add_generic(number_of_bytes, relevant):
     record_old=record_old[number_of_bytes:]
 
 def add_date(number_of_bytes, relevant):
-    # the three date columns are stored as unix ticks
+    # the three date columns are stored as unix ticks:
+    # start and end of the current transaction and the timestamp for the previous transaction
     global record_old
     global record_new
     if args.columns=="all" or relevant==1:
@@ -153,6 +164,15 @@ def read_stat_file(file_name):
     row_num = 0
     csv_string = "" # this string will collect all records of the stat file in human-readable format
 
+    # About SAP stat files:
+    # - SAP stat files will consist of many rows or records
+    # - the starting delimiter of a record is     002a00530041002a where 002a00530041002a stands for ASCII "*SA*" or in German: Satz Anfang
+    # - the ending   delimiter of a record is 1402092a00530045002a where 002a00530045002a stands for ASCII "*SE*" or in German: Satz Ende
+    # - the byte string "1402" usually denotes the end of a field inside the record, but unfortunately things are not always so simple  
+    # - the main record will have a prefix 0380
+    # - the column "Sections" will reveal how many optional sections follow the main record
+    # - one common optional section contains details on the database activity
+
     for record in records:
         if record.startswith("0380"): # only evaluate the main section of the record, which starts with the prefix 0380, and not the optional parts
             row_num = row_num+1
@@ -168,7 +188,7 @@ def read_stat_file(file_name):
             add_generic(4,0)               # some constant FF03
             add_generic(12,0)              # 8 zeros and some time offset
             add_generic(4,1)               # number of optional subsections following the main record
-            for i in range(8):             # calday field
+            for i in range(8):             # calday field (this is redundant due to the transaction start and end fields which follow)
                 record_new = record_new + record_old[i*4+3]
             record_new = record_new + ","
             record_old = record_old[32:]
@@ -196,8 +216,9 @@ def read_stat_file(file_name):
             add_generic(8,0)               # unknown column     
 
             # PART 2
-            # from here on the stat files get messy. there are various columns of varying length.
-            # things will remain chaotic until the SAP user name field
+            # from here on the stat files get very messy. there are various columns of varying length and with yet unknown meaning.
+            # things will remain chaotic until the SAP user name field. in this chaotic section the script often seraches for the
+            # field delimiter "1402".
             #
             # optional number column: RFC+CPIC time 
             # if there is a 40 or 41, then print that SAP number, or 0 else
@@ -230,7 +251,8 @@ def read_stat_file(file_name):
                 column_content = column_content.replace("1402","|")
                 record_new = record_new + column_content
             record_old = record_old[i+2:]
-            # unknown_0d03: search for 00004, that is where the next column (a sap number) will begin
+            # unknown_0d03: this is some unknown field which most of the time starts with the bytes 0d03.
+            # search for 00004, that is where the next column (a SAP number) will begin
             i=0
             while record_old[i:i+5] != "00004" and i<len(record_old):
                 i=i+2
@@ -243,7 +265,7 @@ def read_stat_file(file_name):
                 record_old=record_old[2:] # ignore two surplus bytes after the number
             if record_old[4:8]=="1402":
                 record_old=record_old[4:] # ignore four surplus bytes after the number
-            # unknown_0b: the next entry usually starts with 14020b41
+            # unknown_0b: the next field usually starts with 14020b41
             if record_old[0:4]=="1402":
                 record_old = record_old[4:]
             if record_old[0:4]=="1402":
@@ -269,19 +291,19 @@ def read_stat_file(file_name):
                 record_old=record_old[6:]
             empty_username = 0
             # the next fields are variable in size and number
-            # all content until the SAP username is simply put into one large column
+            # all content until the SAP username is simply put into one wide column.
             # there is some standard delimiter which always precedes the SAP username,
-            # this prefix is now searched:
+            # the script seraches that prefix:
             if record_old[0:4]=="1402":
                 record_old=record_old[4:]
-            index  = record_old.find("14010c00") # this pattern means that the username is empty
+            index  = record_old.find("14010c00")    # this pattern means that the username is empty
             if index<0 or index>100:
                 index = record_old.find("14010b00") # this pattern also means that the username is empty
             if index<0 or index>100:
                 index = record_old.find("14010f00") # this pattern also means that the username is empty
             if index<0 or index>100:
                 index = record_old.find("14010600") # this pattern also means that the username is empty
-            if index>0 and index<100:
+            if index>0 and index<100: # the script found an indication that no username is available for this record and the username field should remain empty
                 empty_username=1
                 if args.columns=="all":
                     column_content = record_old[0:index+6] + ","
@@ -289,7 +311,7 @@ def read_stat_file(file_name):
                     record_new = record_new + column_content
                 record_old=record_old[index+6:]
             else:
-                index=find_delimiter(record_old[0:180]) # to speed up search, only use the first 180 characters of the record
+                index=find_delimiter(record_old[0:180]) # to speed up search, only use the first 180 characters of the record are used for finding the delimiter pattern
                 if args.columns=="all":
                     column_content = record_old[0:index+8] + ","
                     column_content = column_content.replace("1402","|")
@@ -307,7 +329,7 @@ def read_stat_file(file_name):
                 while record_old[0:4]=="0020": # ignore trailing blanks in the username
                     record_old = record_old[4:]
             else:
-                record_new = record_new + ","
+                record_new = record_new + ","  # there was a signal that this record contains no username, so the column remains empty
             if record_old[0:4] == "1401": # skip 6 bytes delimiter if present
                 record_old = record_old[6:]
             # the next field is the 3 digits SAP client / Mandant
@@ -317,7 +339,7 @@ def read_stat_file(file_name):
                 i=i+1
             record_new = record_new + ","
             record_old = record_old[12:]  
-            # the next field is the transaction id
+            # the next field is the transaction id (this info is useful for checking with data shown in transaction STAD)
             for i in range(32):                          
                 value =  record_old[i*4+2:i*4+4]
                 try:
@@ -327,7 +349,7 @@ def read_stat_file(file_name):
                     record_new = record_new + "?"
             record_new = record_new + ","
             record_old = record_old[128:]  
-            # the next field is the session id
+            # the next field is the session id (this info is useful for checking with data shown in transaction STAD)
             for i in range(40):
                 value =  record_old[i*4+2:i*4+4]
                 try:
@@ -337,21 +359,21 @@ def read_stat_file(file_name):
                     record_new = record_new + "?"
             record_new = record_new + ","
             record_old = record_old[160:]  
-            # the next field starts with 140205
+            # the next field usually starts with 140205
             if args.columns=="all":
-                record_new = record_new + record_old[4:8] + "," # unknown field with prefix 05xx
+                record_new = record_new + record_old[4:8] + "," # some field with prefix 05xx and unknown meaning
             if record_old[0:10] == "1402051414": # ignore the surplus 14 in this special case
                 record_old = record_old[10:]
             else:
                 record_old = record_old[8:]
-            # the next field is the network client name (can be a hostname, IP or FQDN)
+            # the next field is the network client name (which can be a hostname, IP or FQDN)
             i=0
             if record_old[0:2]=="14":
                record_new = record_new + " " # the client field is empty
             else:
                 if record_old[0:2] != "00": # ignore a special character at the beginning
                     record_old=record_old[4:]
-                while record_old[i:i+2] != "14" and i<80:  # client limit of 20 characters
+                while record_old[i:i+2] != "14" and i<80:  # client names have a limit of 20 characters
                     value =  record_old[i+2:i+4]
                     try:
                         int(value,16)
@@ -383,7 +405,7 @@ def read_stat_file(file_name):
                     transaction_type='2'
             record_old = record_old[4:]
             record_new = record_new + transaction_type + ","
-            # the next field is the program
+            # the next field is the program name which was executed
             i=0
             while record_old[i:i+2] != "14" and i<len(record_old):
                 value =  record_old[i+2:i+4]
@@ -401,7 +423,7 @@ def read_stat_file(file_name):
             record_old = record_old[4:]
             if record_old[0:4] == "1402":
                 record_old = record_old[4:]
-            # the next field might be the screen?
+            # the next field might be the SAP screen?
             i=0
             column_content=''
             while i<5 and i*4+3<len(record_old):
@@ -410,7 +432,7 @@ def read_stat_file(file_name):
             if args.columns=="all":
                 record_new = record_new + column_content + ","
             record_old = record_old[16:]
-            # the next field is the transaction
+            # the next field is the transaction name
             if record_old[0:4]=="0000":
                 record_new = record_new + ","  # empty transaction name, do not shorten record_old in this case
             else:
@@ -424,22 +446,21 @@ def read_stat_file(file_name):
             if args.columns=="all":
                 record_new = record_new + record_old[0:4] + ","
             record_old = record_old[4:]   
-            # the next field is the previous report
+            # the next field is the previously executed report
             if record_old[0:2] == "00":
                 i=0
                 while record_old[i:i+2] != "14" and i<len(record_old): # previous report
                     record_new = record_new + chr(int(record_old[i+2:i+4],16))
                     i=i+4
             # do a plausibility check:
-            # only use the row if a delimiter was found in function find_delimiter
-            # and the SAP transaction type is known
-            # otherwise ignore the record because it was not decoded correctly 
+            # only use the row if a delimiter was found in function find_delimiter and the SAP transaction type is known
+            # otherwise ignore the record because it was not decoded correctly and is likely garbled
             # (feel free to improve the script!)
             if index<999 and len(transaction_type)==1:
                 csv_string = csv_string + record_new + "\n"
     return csv_string
 
-# define three command line arguments
+# define three optional command line arguments for this script to use
 parser = argparse.ArgumentParser(description='The conversion script allows three command line arguments: --file --columns --output_format')
 parser.add_argument('--file', default='all', help='Which file(s) to process. Specify the file name or simply process all.')
 parser.add_argument('--columns', default='relevant', help='Print out either all or only relevant columns. Many columns meanings are not yet known, these columns are omitted.')
@@ -456,7 +477,7 @@ if args.columns=="all":
     columns_list = ["Rownum","Recordtype", "unknown", "FF03", "unknown", "Sections","Calday","unknown","Starttime","unknown","Endtime","unknown","Processing time","unknown","Roll wait time","unknown","CPU time","unknown","Wait for work process","unknown","GUI time","unknown","Frontend roundtrips","unknown","Net time","unknown","Previous timestamp","unknown","RFC+CPIC time","unknown_var_length","unknown_0d03","unknown_number","unknown_0b","Total memory used","Max EM used in transaction","Max EM used in dia step","unknwon_0e","Username","Client","Transactionid","Sessionid","unknown","Client","Task type","Report","unknown","unknown","Transaction","unknown","Prev Report"]
 else:
     columns_list = [                                                     "Sections","Calday",          "Starttime",          "Endtime",          "Processing time",          "Roll wait time",          "CPU time",          "Wait for work process",          "GUI time",          "Frontend roundtrips",          "Net time",          "Previous timestamp",          "RFC+CPIC time",                                                                  "Total memory used","Max EM used in transaction","Max EM used in dia step",             "Username","Client","Transactionid","Sessionid",          "Client","Task type","Report",                    "Transaction",          "Prev Report"]
-if args.output_format != "csv" and args.output_format != "xls":
+if args.output_format != "csv" and args.output_format != "xls" and args.output_format != "xlsx":
     print("Only output formats csv or xls are possible. Invalid option: " + str(args.output_format))
 
 # get a list of all matching stat files and process them sequentially
@@ -475,7 +496,7 @@ for file_name in os.listdir('.'):
             timestamp = datetime.now()
             formatted_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
             print("Wrote file " + output_file + " with " + str(lines) + " lines of " + str(row_num) + " records from stat file at " + formatted_timestamp) # provide detailed feedback on each processed stat file
-        if args.output_format=="xls":
+        if args.output_format=="xls" or args.output_format=="xlsx":
             output_file = file_name + ".xlsx"
             df = pd.read_csv(StringIO(csv_result), engine='python', on_bad_lines='skip')
             df.columns = columns_list
